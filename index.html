@@ -1019,6 +1019,14 @@
 <div class="screen" id="screen-clientes">
   <input class="search-box" type="text" placeholder="🔍 Buscar cliente..." id="search-input" oninput="filterClients()">
   <div class="client-list" id="list-todos"></div>
+
+  <details style="margin-top:16px">
+    <summary style="font-size:11px;color:var(--texto-suave);cursor:pointer">Opciones avanzadas</summary>
+    <button class="btn-secondary" style="width:100%;margin-top:10px;background:rgba(255,77,87,.15);color:#ff4d57;font-size:12px;padding:10px"
+            onclick="eliminarTodosClientes()">
+      🗑️ Eliminar TODOS los clientes
+    </button>
+  </details>
 </div>
 
 <!-- ==================== AGREGAR ==================== -->
@@ -1173,6 +1181,17 @@
   <p style="font-size:12.5px;color:var(--texto-suave);margin-bottom:14px;line-height:1.5">
     Sube una imagen, un audio o un video para cada tipo de servicio. Cuando abras un cliente, su servicio se relacionará automáticamente con estos archivos para adjuntarlos al mensaje de WhatsApp.
   </p>
+
+  <div style="background:var(--gris-oscuro);border:1px solid var(--gris-claro);border-radius:var(--radio);padding:14px;margin-bottom:16px">
+    <div class="section-title" style="margin-bottom:8px">📤 Subir varias imágenes de una vez</div>
+    <p style="font-size:12px;color:var(--texto-suave);margin:0 0 10px;line-height:1.4">
+      Elige varias imágenes juntas — luego asignas cada una a su servicio antes de guardar.
+    </p>
+    <button class="btn-secondary" style="width:100%" onclick="document.getElementById('input-bulk-imagenes').click()">🖼️ Elegir varias imágenes</button>
+    <input type="file" id="input-bulk-imagenes" accept="image/*" multiple style="display:none" onchange="onBulkImagenes(event)">
+    <div id="bulk-asignacion" style="margin-top:12px;display:none"></div>
+  </div>
+
   <div id="lista-media"></div>
 </div>
 
@@ -1404,6 +1423,24 @@ function mnGuardarNube() {
       if (mnReintentar) { mnReintentar = false; mnGuardarNube(); }
     });
   } catch(e) { mnGuardando = false; }
+}
+
+// Versión "esperable": para operaciones críticas (como borrar todos los
+// clientes) donde hay que confirmar que el guardado en el servidor
+// realmente se completó antes de avisarle al usuario que ya quedó listo,
+// en vez de simplemente lanzarlo y seguir sin saber si llegó.
+async function mnGuardarNubeAhora() {
+  if (!MN_ONLINE) return { ok: true, local: true };
+  try {
+    const r = await fetch('/api/data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(mnRecolectarTodo())
+    });
+    return { ok: r.ok, local: false };
+  } catch(e) {
+    return { ok: false, local: false, error: e };
+  }
 }
 
 // ── Fusión por registro ──
@@ -2746,6 +2783,76 @@ function eliminarMedia(cat, tipo) {
   });
 }
 
+// ============================================================
+// SUBIDA MASIVA DE IMAGENES
+// Eliges varias imagenes de una vez -- la app intenta adivinar a que
+// servicio pertenece cada una por su nombre de archivo (ej: "netflix.jpg"
+// -> Netflix); si no adivina, la dejas en "Sin asignar" y eliges tu.
+// ============================================================
+let bulkImagenesPendientes = [];
+
+function onBulkImagenes(event) {
+  const files = Array.from(event.target.files || []);
+  event.target.value = '';
+  if (!files.length) return;
+
+  Promise.all(files.map(f => leerBase64(f).then(b64 => ({
+    nombre: f.name, mime: f.type, b64,
+    catSugerida: adivinarCategoria(f.name)
+  })))).then(items => {
+    bulkImagenesPendientes = items;
+    renderBulkAsignacion();
+  });
+}
+
+function adivinarCategoria(nombreArchivo) {
+  const n = nombreArchivo.toLowerCase();
+  const match = CATEGORIAS_MEDIA.find(cat => n.includes(cat.key) || n.includes(cat.label.toLowerCase().replace('+', '')));
+  return match ? match.key : '';
+}
+
+function renderBulkAsignacion() {
+  const cont = document.getElementById('bulk-asignacion');
+  if (!bulkImagenesPendientes.length) { cont.style.display = 'none'; cont.innerHTML = ''; return; }
+
+  cont.style.display = 'block';
+  cont.innerHTML = `
+    <div style="font-size:11px;color:var(--texto-suave);margin-bottom:8px;font-weight:700">${bulkImagenesPendientes.length} imagen${bulkImagenesPendientes.length!==1?'es':''} lista${bulkImagenesPendientes.length!==1?'s':''} -- confirma el servicio de cada una:</div>
+    ${bulkImagenesPendientes.map((it, i) => `
+      <div style="display:flex;align-items:center;gap:8px;background:var(--gris-medio);border:1px solid var(--gris-claro);border-radius:9px;padding:8px;margin-bottom:6px">
+        <img src="${it.b64}" style="width:40px;height:40px;object-fit:cover;border-radius:6px;flex-shrink:0">
+        <div style="flex:1;min-width:0;font-size:11px;color:var(--texto-suave);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${it.nombre}</div>
+        <select class="form-input" style="width:auto;padding:6px 8px;font-size:12px;margin:0" onchange="bulkImagenesPendientes[${i}].catSugerida=this.value">
+          <option value="" ${!it.catSugerida ? 'selected' : ''}>Sin asignar</option>
+          ${CATEGORIAS_MEDIA.map(c => `<option value="${c.key}" ${it.catSugerida===c.key?'selected':''}>${c.emoji} ${c.label}</option>`).join('')}
+        </select>
+        <button class="btn-mini del" onclick="quitarBulkImagen(${i})">\u2715</button>
+      </div>
+    `).join('')}
+    <button class="btn-primary" style="margin-top:8px" onclick="guardarBulkImagenes()">Guardar todas</button>
+  `;
+}
+
+function quitarBulkImagen(i) {
+  bulkImagenesPendientes.splice(i, 1);
+  renderBulkAsignacion();
+}
+
+async function guardarBulkImagenes() {
+  const sinAsignar = bulkImagenesPendientes.filter(it => !it.catSugerida);
+  if (sinAsignar.length) { showToast(`\u26a0\ufe0f Asigna un servicio a las ${sinAsignar.length} imagen(es) marcadas "Sin asignar"`); return; }
+  if (!bulkImagenesPendientes.length) return;
+
+  showToast('Guardando imagenes...');
+  for (const it of bulkImagenesPendientes) {
+    await dbGuardar(it.catSugerida, 'imagen', it.b64, it.nombre, it.mime);
+  }
+  showToast(`${bulkImagenesPendientes.length} imagenes guardadas`);
+  bulkImagenesPendientes = [];
+  renderBulkAsignacion();
+  renderMultimedia();
+}
+
 function getFirstName(nombreCompleto) {
   const parts = nombreCompleto.toLowerCase().split(' ');
   // Filter out common noise words
@@ -3427,6 +3534,45 @@ function eliminarCliente() {
   renderUrgentes();
   renderTodos();
   showToast('🗑️ Cliente eliminado');
+}
+
+// Borra TODOS los clientes de una sola vez, de forma segura: crea una
+// "tumba" por cada uno (para que la sincronización no los resucite desde
+// el celular o el servidor) y ESPERA la confirmación real de que el
+// borrado quedó guardado en el servidor antes de avisar que ya terminó
+// — así se evita el problema de borrar uno por uno y que la última
+// tanda no alcance a guardarse si se cierra la app muy rápido.
+async function eliminarTodosClientes() {
+  if (!clientes.length) { showToast('ℹ️ Ya no hay clientes para eliminar'); return; }
+
+  const total = clientes.length;
+  const escrito = prompt(
+    `Esto va a eliminar TODOS tus ${total} clientes, en este dispositivo y en el servidor (celular/PC). No se puede deshacer.\n\nEscribe ELIMINAR para confirmar:`
+  );
+  if (escrito !== 'ELIMINAR') { showToast('❌ Cancelado — no se borró nada'); return; }
+
+  showToast('⏳ Eliminando y guardando, no cierres la app...');
+
+  const ahora = Date.now();
+  clientes.forEach(c => clientesBorrados.push({ id: c.id, ts: ahora }));
+  try { localStorage.setItem('mn_clientes_borrados', JSON.stringify(clientesBorrados)); } catch(e) {}
+
+  clientes = [];
+  try { localStorage.setItem('mn_clientes_todos', JSON.stringify(clientes)); } catch(e) {}
+  guardarClientesExtra();
+
+  updateStats();
+  renderUrgentes();
+  renderTodos();
+
+  const resultado = await mnGuardarNubeAhora();
+  if (resultado.local) {
+    showToast(`🗑️ ${total} clientes eliminados (guardado solo en este dispositivo — no está conectado al servidor)`);
+  } else if (resultado.ok) {
+    showToast(`✅ ${total} clientes eliminados y confirmado en el servidor — ya se refleja en PC y celular`);
+  } else {
+    showToast('⚠️ Se eliminaron aquí, pero no se pudo confirmar con el servidor — revisa tu conexión y vuelve a abrir la app para reintentar');
+  }
 }
 
 // ============================================================
