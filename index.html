@@ -1397,11 +1397,13 @@ const LOGO_DEFAULT = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAQ
 // ============================================================
 const MN_ONLINE = location.protocol.indexOf('http') === 0;
 
-function mnRecolectarTodo() {
+async function mnRecolectarTodo() {
   let logo = null;
   try { logo = localStorage.getItem('mn_logo'); } catch(e) {}
+  let media = {};
+  try { media = await dbObtenerTodos(); } catch(e) {}
   return {
-    clientes, productos, transacciones, logo,
+    clientes, productos, transacciones, logo, media,
     borrados: (typeof clientesBorrados !== 'undefined') ? clientesBorrados : [],
     fidelizacion: (typeof clientesFidelizacion !== 'undefined') ? clientesFidelizacion : [],
     ts: Date.now()
@@ -1409,15 +1411,16 @@ function mnRecolectarTodo() {
 }
 
 let mnGuardando = false, mnReintentar = false;
-function mnGuardarNube() {
+async function mnGuardarNube() {
   if (!MN_ONLINE) return;
   if (mnGuardando) { mnReintentar = true; return; }
   mnGuardando = true;
   try {
+    const payload = await mnRecolectarTodo();
     fetch('/api/data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(mnRecolectarTodo())
+      body: JSON.stringify(payload)
     }).catch(() => {}).finally(() => {
       mnGuardando = false;
       if (mnReintentar) { mnReintentar = false; mnGuardarNube(); }
@@ -1425,17 +1428,18 @@ function mnGuardarNube() {
   } catch(e) { mnGuardando = false; }
 }
 
-// Versión "esperable": para operaciones críticas (como borrar todos los
+// Version "esperable": para operaciones criticas (como borrar todos los
 // clientes) donde hay que confirmar que el guardado en el servidor
-// realmente se completó antes de avisarle al usuario que ya quedó listo,
-// en vez de simplemente lanzarlo y seguir sin saber si llegó.
+// realmente se completo antes de avisarle al usuario que ya quedo listo,
+// en vez de simplemente lanzarlo y seguir sin saber si llego.
 async function mnGuardarNubeAhora() {
   if (!MN_ONLINE) return { ok: true, local: true };
   try {
+    const payload = await mnRecolectarTodo();
     const r = await fetch('/api/data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(mnRecolectarTodo())
+      body: JSON.stringify(payload)
     });
     return { ok: r.ok, local: false };
   } catch(e) {
@@ -1508,11 +1512,25 @@ async function mnCargarNube() {
       try { localStorage.setItem('mn_fidelizacion', JSON.stringify(clientesFidelizacion)); } catch(e){}
     }
     if (d.logo) { try { localStorage.setItem('mn_logo', d.logo); } catch(e){} }
+    if (d.media && Object.keys(d.media).length) {
+      try { await dbGuardarTodos(d.media); } catch(e) {}
+      if (typeof renderMultimedia === 'function') renderMultimedia();
+    }
 
     recalcularDiasClientes();
     updateStats(); renderUrgentes(); renderTodos();
     if (typeof aplicarLogoGuardado === 'function') aplicarLogoGuardado();
     if (typeof renderFidelizacion === 'function') renderFidelizacion();
+
+    // La primera vez que esta sincronización se completa (puede tardar
+    // unos segundos), el aviso emergente ya se había mostrado con datos
+    // viejos/locales — se vuelve a refrescar aquí con los datos reales
+    // recién traídos del servidor, para que no se quede mostrando
+    // números de antes de sincronizar.
+    if (!mnPrimeraCargaHecha) {
+      mnPrimeraCargaHecha = true;
+      mostrarAlertaUrgentes({ inicial: true });
+    }
 
     // Guarda de vuelta la fusión ya resuelta, para que el servidor quede
     // al día con lo que se acaba de combinar (por si el otro dispositivo
@@ -1520,6 +1538,7 @@ async function mnCargarNube() {
     mnGuardarNube();
   } catch(e) { /* sin conexión al servidor por ahora, sigue con lo local */ }
 }
+let mnPrimeraCargaHecha = false;
 
 
 // ============================================================
@@ -2698,6 +2717,16 @@ function dbObtenerTodos() {
     req.onerror = () => fail(req.error);
   }));
 }
+function dbGuardarTodos(mediaObj) {
+  if (!mediaObj || !Object.keys(mediaObj).length) return Promise.resolve();
+  return abrirDB().then(db => new Promise((ok, fail) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    Object.keys(mediaObj).forEach(key => store.put(mediaObj[key], key));
+    tx.oncomplete = ok;
+    tx.onerror = () => fail(tx.error);
+  }));
+}
 
 function leerBase64(file) {
   return new Promise((ok, fail) => {
@@ -3401,6 +3430,19 @@ function importarYCombinar(event) {
       const data = JSON.parse(reader.result);
       if (!data.clientes && !data.transacciones && !data.productos) throw new Error('Archivo no válido');
 
+      // Una importación manual es una señal clara de "sí quiero estos
+      // clientes de vuelta" — así que se les quita cualquier "tumba" de
+      // un borrado anterior que los estuviera bloqueando (por ejemplo, si
+      // alguna vez se usó "Eliminar TODOS" en este mismo dispositivo).
+      if (Array.isArray(data.clientes) && data.clientes.length) {
+        const idsImportados = new Set(data.clientes.map(c => c.id));
+        const antesLen = clientesBorrados.length;
+        clientesBorrados = clientesBorrados.filter(b => !idsImportados.has(b.id));
+        if (clientesBorrados.length !== antesLen) {
+          try { localStorage.setItem('mn_clientes_borrados', JSON.stringify(clientesBorrados)); } catch(e) {}
+        }
+      }
+
       const antes = clientes.length;
       if (Array.isArray(data.clientes)) mnFusionarClientes(data.clientes, data.borrados || []);
       const nuevos = Math.max(0, clientes.length - antes);
@@ -3440,7 +3482,15 @@ function importarDatos(event) {
       );
       if (!ok) return;
 
-      if (data.clientes)      { clientes = data.clientes; localStorage.setItem('mn_clientes_todos', JSON.stringify(clientes)); }
+      if (data.clientes)      {
+        clientes = data.clientes;
+        localStorage.setItem('mn_clientes_todos', JSON.stringify(clientes));
+        // Limpia cualquier tumba de un borrado anterior que bloquee a estos
+        // clientes recién restaurados (una restauración manual siempre gana).
+        const idsRestaurados = new Set(clientes.map(c => c.id));
+        clientesBorrados = clientesBorrados.filter(b => !idsRestaurados.has(b.id));
+        try { localStorage.setItem('mn_clientes_borrados', JSON.stringify(clientesBorrados)); } catch(e) {}
+      }
       if (data.productos)     { productos = data.productos; localStorage.setItem('mn_productos', JSON.stringify(productos)); }
       if (data.transacciones) { transacciones = data.transacciones; localStorage.setItem('mn_transacciones', JSON.stringify(transacciones)); }
 
