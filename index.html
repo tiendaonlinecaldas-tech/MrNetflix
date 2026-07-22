@@ -1211,7 +1211,7 @@
     <div class="adjuntos-box">
       <div class="adjuntos-title">📎 Multimedia que se enviará con el mensaje</div>
       <div class="adjuntos-tags" id="adjuntos-precargados"></div>
-      <input type="file" id="adjunto-extra-input" class="file-input-hidden" accept="image/*,audio/*,video/*" onchange="onAdjuntoExtra(event)">
+      <input type="file" id="adjunto-extra-input" class="file-input-hidden" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onchange="onAdjuntoExtra(event)">
       <button class="adjuntos-extra-btn" onclick="document.getElementById('adjunto-extra-input').click()">+ Agregar archivo extra para este envío</button>
       <div class="adjunto-extra-name" id="adjunto-extra-name" style="display:none"></div>
     </div>
@@ -1497,9 +1497,19 @@ async function mnCargarNube() {
   if (!MN_ONLINE) return;
   try {
     const r = await fetch('/api/data');
-    if (!r.ok) return;
+    if (!r.ok) {
+      mnUltimoError = `El servidor respondió con error ${r.status}`;
+      if (!mnPrimeraCargaHecha) showToast(`⚠️ No se pudo sincronizar (error ${r.status}) — mostrando solo lo local`);
+      actualizarEstadoConexionDetalle();
+      return;
+    }
     const d = await r.json();
-    if (!d || !d.ts) return;
+    if (!d || !d.ts) {
+      // Respuesta vacía/nueva del servidor (primera vez que se usa) — no es un error.
+      mnUltimoError = null;
+      actualizarEstadoConexionDetalle();
+      return;
+    }
 
     mnFusionarClientes(d.clientes, d.borrados);
     try { localStorage.setItem('mn_clientes_todos', JSON.stringify(clientes)); } catch(e){}
@@ -1512,15 +1522,20 @@ async function mnCargarNube() {
       try { localStorage.setItem('mn_fidelizacion', JSON.stringify(clientesFidelizacion)); } catch(e){}
     }
     if (d.logo) { try { localStorage.setItem('mn_logo', d.logo); } catch(e){} }
-    if (d.media && Object.keys(d.media).length) {
+
+    const mediaKeys = d.media ? Object.keys(d.media) : [];
+    if (mediaKeys.length) {
       try { await dbGuardarTodos(d.media); } catch(e) {}
       if (typeof renderMultimedia === 'function') renderMultimedia();
     }
+    mnUltimaMediaRecibida = mediaKeys.length;
+    mnUltimoError = null;
 
     recalcularDiasClientes();
     updateStats(); renderUrgentes(); renderTodos();
     if (typeof aplicarLogoGuardado === 'function') aplicarLogoGuardado();
     if (typeof renderFidelizacion === 'function') renderFidelizacion();
+    actualizarEstadoConexionDetalle();
 
     // La primera vez que esta sincronización se completa (puede tardar
     // unos segundos), el aviso emergente ya se había mostrado con datos
@@ -1536,9 +1551,15 @@ async function mnCargarNube() {
     // al día con lo que se acaba de combinar (por si el otro dispositivo
     // pregunta antes de que este vuelva a guardar algo).
     mnGuardarNube();
-  } catch(e) { /* sin conexión al servidor por ahora, sigue con lo local */ }
+  } catch(e) {
+    mnUltimoError = 'No se pudo conectar con el servidor: ' + (e && e.message ? e.message : e);
+    if (!mnPrimeraCargaHecha) showToast('⚠️ Sin conexión con el servidor — mostrando solo lo local');
+    actualizarEstadoConexionDetalle();
+  }
 }
 let mnPrimeraCargaHecha = false;
+let mnUltimoError = null;
+let mnUltimaMediaRecibida = 0;
 
 
 // ============================================================
@@ -2781,9 +2802,10 @@ function renderMultimedia() {
 
   dbObtenerTodos().then(todos => {
     const tipos = [
-      { tipo:'imagen', etiqueta:'Imagen', accept:'image/*' },
-      { tipo:'audio',  etiqueta:'Audio',  accept:'audio/*' },
-      { tipo:'video',  etiqueta:'Video',  accept:'video/*' },
+      { tipo:'imagen',    etiqueta:'Imagen',    accept:'image/*' },
+      { tipo:'documento', etiqueta:'Documento', accept:'.pdf,.doc,.docx,.xls,.xlsx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
+      { tipo:'audio',     etiqueta:'Audio',     accept:'audio/*' },
+      { tipo:'video',     etiqueta:'Video',     accept:'video/*' },
     ];
     cont.innerHTML = CATEGORIAS_MEDIA.map(cat => {
       const filas = tipos.map(t => {
@@ -2795,8 +2817,10 @@ function renderMultimedia() {
             preview = `<img src="${entry.b64}"><div class="media-preview-name">${entry.nombre}</div>`;
           else if (t.tipo === 'audio')
             preview = `<audio src="${entry.b64}" controls></audio><div class="media-preview-name">${entry.nombre}</div>`;
-          else
+          else if (t.tipo === 'video')
             preview = `<video src="${entry.b64}" controls playsinline></video><div class="media-preview-name">${entry.nombre}</div>`;
+          else
+            preview = `<div style="font-size:24px">📄</div><div class="media-preview-name">${entry.nombre}</div>`;
         }
         const inputId = `mi-${cat.key}-${t.tipo}`;
         return `
@@ -3121,7 +3145,7 @@ function onAdjuntoExtra(event) {
 // Devuelve Promise<Array<{b64,nombre,mime}>>
 function recolectarArchivos() {
   const cat   = clienteActivo ? categoriaDeServicio(clienteActivo.servicio) : null;
-  const tipos = ['imagen','audio','video'];
+  const tipos = ['imagen','documento','audio','video'];
   const promesas = cat ? tipos.map(t => dbObtener(cat, t)) : tipos.map(() => Promise.resolve(null));
   return Promise.all(promesas).then(res => {
     const lista = res.filter(Boolean);
@@ -3313,7 +3337,7 @@ function avisarDescarga(tieneArchivos) {
 // (usado por el envío rápido desde el aviso emergente de vencidos).
 function recolectarArchivosDeCliente(cliente) {
   const cat   = cliente ? categoriaDeServicio(cliente.servicio) : null;
-  const tipos = ['imagen','audio','video'];
+  const tipos = ['imagen','documento','audio','video'];
   const promesas = cat ? tipos.map(t => dbObtener(cat, t)) : tipos.map(() => Promise.resolve(null));
   return Promise.all(promesas).then(res => res.filter(Boolean));
 }
@@ -3550,17 +3574,37 @@ function mostrarInfoBackup() {
 }
 
 function mostrarEstadoConexion() {
+  actualizarEstadoConexionDetalle();
+}
+
+function actualizarEstadoConexionDetalle() {
   const el = document.getElementById('conexion-estado');
   if (!el) return;
-  if (MN_ONLINE) {
-    el.textContent = '🟢 Conectado al servidor — abierto con el lanzador correcto, listo para sincronizar con el celular.';
-    el.style.background = 'rgba(70,211,105,.12)';
-    el.style.color = 'var(--verde,#46d369)';
-  } else {
+
+  if (!MN_ONLINE) {
     el.textContent = '🔴 Abierto SIN el servidor (archivo directo) — el celular no podrá conectarse así. Ábrelo con MrNetflix_PC.vbs.';
     el.style.background = 'rgba(255,77,87,.12)';
     el.style.color = '#ff4d57';
+    return;
   }
+
+  if (mnUltimoError) {
+    el.textContent = `⚠️ Conectado, pero la última sincronización falló: ${mnUltimoError}`;
+    el.style.background = 'rgba(245,166,35,.12)';
+    el.style.color = 'var(--amarillo,#f5a623)';
+    return;
+  }
+
+  if (!mnPrimeraCargaHecha) {
+    el.textContent = '🟡 Conectado — sincronizando por primera vez...';
+    el.style.background = 'rgba(245,166,35,.12)';
+    el.style.color = 'var(--amarillo,#f5a623)';
+    return;
+  }
+
+  el.textContent = `🟢 Sincronizado con el servidor · ${mnUltimaMediaRecibida} archivo${mnUltimaMediaRecibida!==1?'s':''} de multimedia recibido${mnUltimaMediaRecibida!==1?'s':''}`;
+  el.style.background = 'rgba(70,211,105,.12)';
+  el.style.color = 'var(--verde,#46d369)';
 }
 mostrarEstadoConexion();
 
